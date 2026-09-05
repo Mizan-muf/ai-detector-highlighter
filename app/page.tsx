@@ -37,6 +37,8 @@ export default function Home() {
   const [copied, setCopied]                   = useState(false);
   const [activeFilter, setActiveFilter]       = useState<'all' | 'AI' | 'Uncertain' | 'Human'>('all');
   const [workerReady, setWorkerReady]         = useState(false);
+  const [hfToken, setHfToken]                 = useState('');
+  const [showToken, setShowToken]             = useState(false);
 
   const workerRef = useRef<Worker | null>(null);
 
@@ -167,7 +169,7 @@ export default function Home() {
 
     setAppStatus('downloading');
     setStatusMsg('Starting model…');
-    workerRef.current.postMessage({ type: 'classify', sentences });
+    workerRef.current.postMessage({ type: 'classify', sentences, token: hfToken.trim() || null });
   };
 
   const loadSample = (key: keyof typeof SAMPLE_TEXTS) => {
@@ -262,12 +264,37 @@ export default function Home() {
 
         {/* ── Mode info banner ── */}
         {mode === 'neural' && (
-          <div className="flex items-start gap-3 bg-indigo-950/40 border border-indigo-800/50 rounded-xl p-3.5 text-sm text-indigo-200 max-w-3xl mx-auto">
-            <Info className="w-4 h-4 mt-0.5 shrink-0 text-indigo-400" />
-            <span>
-              <strong>Neural mode</strong> downloads ~80 MB ONNX model on first run (cached afterwards).
-              Results are highly accurate. Switch to <strong>Statistical</strong> for instant results.
-            </span>
+          <div className="flex flex-col gap-3 bg-indigo-950/40 border border-indigo-800/50 rounded-xl p-4 text-sm text-indigo-200 max-w-3xl mx-auto">
+            <div className="flex items-start gap-3">
+              <Info className="w-4 h-4 mt-0.5 shrink-0 text-indigo-400" />
+              <span>
+                <strong>Neural mode</strong> uses the <strong>openai-community/roberta-base-openai-detector</strong> model
+                via the free HuggingFace Inference API. No download needed.
+                Text is sent to HuggingFace servers. For privacy, use <strong>Statistical</strong> mode.
+              </span>
+            </div>
+            <div className="flex items-center gap-2 pl-7">
+              <button
+                onClick={() => setShowToken(t => !t)}
+                className="text-xs text-indigo-400 hover:text-indigo-200 underline underline-offset-2 transition shrink-0"
+              >
+                {showToken ? '▲ Hide' : '▼ Add free HF token'} (optional, for higher rate limits)
+              </button>
+            </div>
+            {showToken && (
+              <div className="pl-7 flex items-center gap-2">
+                <input
+                  type="password"
+                  value={hfToken}
+                  onChange={e => setHfToken(e.target.value)}
+                  placeholder="hf_xxxxxxxxxxxxxxxx  (get free token at huggingface.co/settings/tokens)"
+                  className="flex-1 bg-slate-900 border border-indigo-800/60 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 font-mono"
+                />
+                {hfToken && (
+                  <button onClick={() => setHfToken('')} className="text-slate-400 hover:text-rose-400 text-xs transition">Clear</button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -315,7 +342,7 @@ export default function Home() {
             />
             <div className="px-4 py-3 border-t border-slate-800 flex items-center justify-between gap-3">
               <span className="text-[11px] text-slate-500">
-                {mode === 'neural' ? 'RoBERTa ONNX · Xenova HuggingFace' : 'Burstiness + Lexical Entropy'}
+                {mode === 'neural' ? 'HF Inference API · openai-community/roberta-base-openai-detector' : 'Burstiness + Lexical Entropy'}
               </span>
               <button
                 onClick={handleAnalyse}

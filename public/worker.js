@@ -1,31 +1,52 @@
-// Use @xenova/transformers v2 — the stable, browser-native version.
-// Note: @huggingface/transformers (v4) has breaking API differences and
-// does NOT exist at v3.x. @xenova/transformers@2 is the proven browser build.
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+/**
+ * AuraDetect Neural Worker
+ * 
+ * Uses the HuggingFace FREE Inference API — no token required for public models.
+ * Model: openai-community/roberta-base-openai-detector (the original OpenAI model)
+ * Labels: "Real" = Human-written, "Fake" = AI-generated
+ * 
+ * No ONNX download. No local model. Sentences are sent to HF servers.
+ * Rate limit: ~30k chars/month without token, unlimited with a free HF token.
+ */
 
-// Serve ONNX wasm from the Xenova CDN, disable local model lookup
-env.allowLocalModels = false;
-env.useBrowserCache = true;
+const HF_API_URL =
+  'https://api-inference.huggingface.co/models/openai-community/roberta-base-openai-detector';
 
-// Lazy singleton — model only downloads on first classify call
-let classifier = null;
+// Retry with exponential backoff (handles model cold-start 503)
+async function callHF(text, token, attempt = 0) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
-async function getClassifier(onProgress) {
-  if (classifier) return classifier;
+  const res = await fetch(HF_API_URL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ inputs: text }),
+  });
 
-  // Xenova/roberta-base-openai-detector is the public HuggingFace repo with
-  // prebuilt ONNX files: LABEL_0 = Real/Human, LABEL_1 = AI/Fake
-  classifier = await pipeline(
-    'text-classification',
-    'Xenova/roberta-base-openai-detector',
-    { progress_callback: onProgress }
-  );
+  if (res.status === 503) {
+    // Model is warming up — HF returns estimated_time
+    const body = await res.json().catch(() => ({}));
+    const wait = Math.min((body.estimated_time || 10) * 1000, 20000);
+    self.postMessage({ type: 'status', message: `Model warming up, retrying in ${Math.round(wait / 1000)}s…` });
+    await new Promise(r => setTimeout(r, wait));
+    if (attempt < 3) return callHF(text, token, attempt + 1);
+    throw new Error('Model did not respond after 3 retries. Try again in a minute.');
+  }
 
-  return classifier;
+  if (res.status === 401 || res.status === 403) {
+    throw new Error('Token rejected. Check your HuggingFace token and try again.');
+  }
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `HTTP ${res.status}`);
+  }
+
+  return res.json();
 }
 
 self.addEventListener('message', async (event) => {
-  const { type, sentences } = event.data;
+  const { type, sentences, token } = event.data;
 
   if (type === 'ping') {
     self.postMessage({ type: 'pong' });
@@ -34,50 +55,60 @@ self.addEventListener('message', async (event) => {
 
   if (type === 'classify') {
     try {
-      // ── 1. Load / download model ──────────────────────────────────────────
-      self.postMessage({ type: 'status', message: 'Downloading model (first run only)...' });
-
-      const cls = await getClassifier((prog) => {
-        // prog: { status, name, file, progress, loaded, total }
-        const pct = prog.progress != null ? Math.round(prog.progress) : null;
-        self.postMessage({ type: 'download_progress', file: prog.file, percent: pct });
-      });
-
-      // ── 2. Classify each sentence ─────────────────────────────────────────
       const valid = (sentences || [])
         .map(s => (s || '').trim())
-        .filter(s => s.length > 0);
+        .filter(s => s.length > 2); // skip tiny fragments
 
       if (valid.length === 0) {
         self.postMessage({ type: 'complete', results: [] });
         return;
       }
 
-      self.postMessage({ type: 'status', message: 'Scanning sentences...' });
+      self.postMessage({ type: 'status', message: 'Connecting to model…' });
 
       const results = [];
+
       for (let i = 0; i < valid.length; i++) {
         const text = valid[i];
-        // RoBERTa max token limit ~512. Truncate by chars as a safety net.
-        const safe = text.length > 800 ? text.slice(0, 800) : text;
+        // RoBERTa max 512 tokens — cap at 500 chars safely
+        const safe = text.length > 500 ? text.slice(0, 500) : text;
 
-        let out;
+        let aiPercent = 50; // neutral default on per-sentence failure
+
         try {
-          out = await cls(safe, { topk: 1 });
-        } catch (e) {
-          // Per-sentence fallback — don't abort the whole run
-          out = [{ label: 'LABEL_0', score: 0.5 }];
-        }
+          const raw = await callHF(safe, token || null);
 
-        // Normalize label — model returns LABEL_0 (Real) or LABEL_1 (AI/Fake)
-        const top = (out && out[0]) ? out[0] : { label: 'LABEL_0', score: 0.5 };
-        const isAI = top.label === 'LABEL_1';
-        const aiPct = Math.min(99, Math.max(1, Math.round((isAI ? top.score : 1 - top.score) * 100)));
+          /**
+           * HF response format for text-classification:
+           *   [[{ label: "Real", score: 0.97 }, { label: "Fake", score: 0.03 }]]
+           * OR (batch=1):
+           *   [{ label: "Real", score: 0.97 }, { label: "Fake", score: 0.03 }]
+           */
+          const topLevel = Array.isArray(raw) ? raw : [];
+          const preds = Array.isArray(topLevel[0]) ? topLevel[0] : topLevel;
+
+          const fakeEntry = preds.find(p =>
+            String(p.label).toLowerCase() === 'fake'
+          );
+          const realEntry = preds.find(p =>
+            String(p.label).toLowerCase() === 'real'
+          );
+
+          if (fakeEntry) {
+            aiPercent = Math.min(99, Math.max(1, Math.round(fakeEntry.score * 100)));
+          } else if (realEntry) {
+            aiPercent = Math.min(99, Math.max(1, Math.round((1 - realEntry.score) * 100)));
+          }
+        } catch (sentenceErr) {
+          // Per-sentence failure: log and continue with neutral score
+          console.warn(`Sentence ${i + 1} failed:`, sentenceErr);
+          aiPercent = 50;
+        }
 
         results.push({
           text: valid[i],
-          aiScore: aiPct,
-          label: aiPct >= 65 ? 'AI' : aiPct <= 35 ? 'Human' : 'Uncertain',
+          aiScore: aiPercent,
+          label: aiPercent >= 65 ? 'AI' : aiPercent <= 35 ? 'Human' : 'Uncertain',
         });
 
         self.postMessage({
