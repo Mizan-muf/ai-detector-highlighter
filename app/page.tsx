@@ -67,10 +67,8 @@ export default function Home() {
           }
 
           case 'status':
-            if (d.message?.includes('Scanning')) {
-              setAppStatus('scanning');
-              setDownloadPct(null);
-            }
+            // Switch from 'downloading' to 'scanning' once model is warm
+            if (appStatus !== 'scanning') setAppStatus('scanning');
             setStatusMsg(d.message || '');
             break;
 
@@ -82,6 +80,15 @@ export default function Home() {
           case 'complete': {
             const res: SentenceResult[] = d.results || [];
             finishWithResults(res);
+            break;
+          }
+
+          case 'partial_complete': {
+            // Rate limited mid-run — show what we got + the error
+            const partial: SentenceResult[] = d.results || [];
+            finishWithResults(partial);
+            setAppStatus('error');
+            setErrorMsg(d.error || 'Partial results only.');
             break;
           }
 
@@ -404,15 +411,29 @@ export default function Home() {
             {appStatus === 'error' && (
               <div className="mx-4 mt-4 flex items-start gap-3 bg-rose-950/40 border border-rose-800/60 rounded-xl p-3.5 text-sm text-rose-200 shrink-0">
                 <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0 text-rose-400" />
-                <div className="space-y-1">
-                  <p className="font-semibold text-rose-300">Neural model error</p>
-                  <p className="text-xs text-rose-400">{errorMsg}</p>
-                  <button
-                    onClick={() => { setMode('statistical'); setAppStatus('idle'); setErrorMsg(''); }}
-                    className="mt-1.5 px-3 py-1 rounded-lg bg-rose-800/40 hover:bg-rose-700/40 text-rose-200 text-xs font-medium transition"
-                  >
-                    Switch to Statistical mode →
-                  </button>
+                <div className="space-y-2 w-full">
+                  <p className="font-semibold text-rose-300">
+                    {errorMsg.includes('RATE_LIMIT') || errorMsg.includes('rate limit') || errorMsg.includes('Rate limit')
+                      ? '⚠️ API Rate Limited — Token Required'
+                      : 'Neural model error'}
+                  </p>
+                  <p className="text-xs text-rose-300/80 whitespace-pre-wrap leading-relaxed">{errorMsg}</p>
+                  <div className="flex flex-wrap items-center gap-2 pt-1">
+                    {(errorMsg.includes('rate limit') || errorMsg.includes('Rate limit') || errorMsg.includes('RATE_LIMIT')) && (
+                      <button
+                        onClick={() => { setShowToken(true); setAppStatus('idle'); setErrorMsg(''); }}
+                        className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold transition"
+                      >
+                        + Add Free HF Token →
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { setMode('statistical'); setAppStatus('idle'); setErrorMsg(''); }}
+                      className="px-3 py-1 rounded-lg bg-rose-800/40 hover:bg-rose-700/40 text-rose-200 text-xs font-medium transition"
+                    >
+                      Use Statistical mode instead
+                    </button>
+                  </div>
                 </div>
               </div>
             )}
