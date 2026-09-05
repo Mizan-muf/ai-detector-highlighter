@@ -9,9 +9,7 @@ import {
   Copy,
   Check,
   Download,
-  AlertCircle,
   FileText,
-  HelpCircle,
   BarChart3,
   ShieldCheck
 } from 'lucide-react';
@@ -49,17 +47,18 @@ export default function Home() {
       workerRef.current = new Worker('/worker.js', { type: 'module' });
 
       workerRef.current.onmessage = (e) => {
-        const { type, results: workerResults, progress: workerProgress, error } = e.data;
+        // percent is a top-level field on progress messages from the worker
+        const { type, results: workerResults, percent, error } = e.data;
 
         if (type === 'download_progress') {
           setModelStatus('loading_model');
         } else if (type === 'ready') {
           setModelStatus('ready');
         } else if (type === 'progress') {
-          setProgress(workerProgress?.percent || 0);
+          setProgress(percent ?? 0); // BUG FIX: was workerProgress?.percent (always undefined)
         } else if (type === 'complete') {
-          setResults(workerResults);
-          if (workerResults.length > 0) {
+          setResults(workerResults ?? []);
+          if (workerResults && workerResults.length > 0) {
             const avg = Math.round(
               workerResults.reduce((acc: number, curr: SentenceResult) => acc + curr.aiScore, 0) /
                 workerResults.length
@@ -72,8 +71,8 @@ export default function Home() {
           console.error('Worker error:', error);
           setLoading(false);
           setModelStatus('error');
-          // Fallback automatically to statistical
-          fallbackToStatistical();
+          // Note: cannot call fallbackToStatistical() here - stale closure.
+          // User can switch to Statistical mode and retry.
         }
       };
 

@@ -6,6 +6,7 @@ env.useBrowserCache = true;
 
 class TextClassifierSingleton {
   static task = 'text-classification';
+  // LABEL_0 = Real/Human, LABEL_1 = AI/Fake (some versions: 'Real' / 'Fake')
   static model = 'onnx-community/roberta-base-openai-detector';
   static instance = null;
 
@@ -25,49 +26,59 @@ self.addEventListener('message', async (event) => {
 
   if (type === 'init') {
     try {
-      await TextClassifierSingleton.getInstance((progress) => {
-        self.postMessage({ type: 'download_progress', progress });
+      await TextClassifierSingleton.getInstance((prog) => {
+        self.postMessage({ type: 'download_progress', data: prog });
       });
       self.postMessage({ type: 'ready' });
     } catch (err) {
-      self.postMessage({ type: 'error', error: err.message });
+      self.postMessage({ type: 'error', error: String(err && err.message ? err.message : err) });
     }
     return;
   }
 
   if (type === 'classify') {
     try {
-      const classifier = await TextClassifierSingleton.getInstance((progress) => {
-        self.postMessage({ type: 'download_progress', progress });
+      const classifier = await TextClassifierSingleton.getInstance((prog) => {
+        self.postMessage({ type: 'download_progress', data: prog });
       });
 
+      const validSentences = (sentences || []).filter(s => s && s.trim().length > 0);
+      const total = validSentences.length;
+
+      if (total === 0) {
+        self.postMessage({ type: 'complete', results: [] });
+        return;
+      }
+
       const results = [];
-      const total = sentences.length;
 
       for (let i = 0; i < total; i++) {
-        const text = sentences[i].trim();
-        if (!text) continue;
+        const text = validSentences[i].trim();
+        // RoBERTa has a 512-token limit; truncate long sentences safely
+        const safe = text.length > 900 ? text.slice(0, 900) : text;
 
         let output;
         try {
-          output = await classifier(text);
+          output = await classifier(safe);
         } catch (e) {
-          // Fallback if individual line fails
           output = [{ label: 'LABEL_0', score: 0.5 }];
         }
 
-        // roberta-base-openai-detector outputs LABEL_0 (Human/Real) vs LABEL_1 (Fake/AI) or 'Real'/'Fake'
-        const first = output[0] || { label: 'LABEL_0', score: 0.5 };
-        const isAi = first.label === 'LABEL_1' || first.label.toLowerCase() === 'fake';
-        const aiScore = isAi ? first.score : 1 - first.score;
-        const aiPercent = Math.round(aiScore * 100);
+        // top result from pipeline is always index 0
+        const top = output[0] || { label: 'LABEL_0', score: 0.5 };
+        // normalize label – handle both 'LABEL_1' and 'Fake' variants
+        const labelLower = String(top.label).toLowerCase();
+        const isAI = labelLower === 'label_1' || labelLower === 'fake';
+        const aiScore = isAI ? top.score : 1 - top.score;
+        const aiPercent = Math.min(99, Math.max(1, Math.round(aiScore * 100)));
 
         results.push({
-          text: sentences[i],
+          text: validSentences[i],
           aiScore: aiPercent,
           label: aiPercent >= 65 ? 'AI' : aiPercent <= 35 ? 'Human' : 'Uncertain',
         });
 
+        // percent is sent as a top-level field (not nested under a 'progress' key)
         self.postMessage({
           type: 'progress',
           current: i + 1,
@@ -78,7 +89,7 @@ self.addEventListener('message', async (event) => {
 
       self.postMessage({ type: 'complete', results });
     } catch (err) {
-      self.postMessage({ type: 'error', error: err.message });
+      self.postMessage({ type: 'error', error: String(err && err.message ? err.message : err) });
     }
   }
 });
